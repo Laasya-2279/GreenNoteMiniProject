@@ -86,17 +86,22 @@ const LiveMonitoring = () => {
         const L = await import('leaflet');
 
         if (markersRef.current[corridorId]) {
+            // Smooth marker movement via setLatLng
             markersRef.current[corridorId].setLatLng([position.lat, position.lng]);
         } else {
+            // First time seeing this ambulance — create a pulsing marker
             const marker = L.marker([position.lat, position.lng], {
                 icon: L.divIcon({
                     className: 'ambulance-marker',
-                    html: '<div style="background:#ef4444;color:white;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;border:3px solid white;box-shadow:0 2px 10px rgba(239,68,68,0.5);animation:pulse-glow 1.5s infinite">🚑</div>',
+                    html: `<div style="background:#ef4444;color:white;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;border:3px solid white;box-shadow:0 2px 10px rgba(239,68,68,0.5);animation:pulse-glow 1.5s infinite;">🚑</div>`,
                     iconSize: [34, 34]
                 })
             }).addTo(mapInstance.current).bindPopup(`<b>Ambulance</b><br>Corridor: ${corridorId}`);
             markersRef.current[corridorId] = marker;
         }
+
+        // Auto-pan map to follow latest ambulance
+        mapInstance.current.panTo([position.lat, position.lng], { animate: true, duration: 0.5 });
     };
 
     const fetchCorridors = async () => {

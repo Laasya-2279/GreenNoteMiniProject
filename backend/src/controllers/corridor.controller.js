@@ -2,24 +2,75 @@ const GreenCorridor = require('../models/GreenCorridor');
 const Hospital = require('../models/Hospital');
 const Ambulance = require('../models/Ambulance');
 const AuditLog = require('../models/AuditLog');
+const { geocodePair } = require('../algorithms/geocodingService');
+const { fetchRoutes } = require('../algorithms/osrmService');
+const { evaluateRoutes } = require('../algorithms/emergencyCostEngine');
+const Route = require('../models/Route');
 
 // POST /api/corridors - Create green corridor request
+// Accepts source/destination as hospital IDs OR location names
 const createCorridor = async (req, res, next) => {
     try {
         const {
             destinationHospitalId, organType, urgencyLevel,
-            ambulanceId, doctorInCharge, notes
+            ambulanceId, doctorInCharge, notes,
+            sourceName, destinationName
         } = req.body;
 
-        // Get source hospital (logged in user's hospital)
-        const sourceHospital = await Hospital.findOne({ hospitalId: req.body.sourceHospitalId || req.user.hospitalId });
-        if (!sourceHospital) {
-            return res.status(400).json({ success: false, message: 'Source hospital not found' });
+        let sourceHospital, destHospital;
+
+        // Option A: Hospital IDs provided (existing flow)
+        if (req.body.sourceHospitalId || req.user.hospitalId) {
+            sourceHospital = await Hospital.findOne({ hospitalId: req.body.sourceHospitalId || req.user.hospitalId });
+            if (!sourceHospital) {
+                return res.status(400).json({ success: false, message: 'Source hospital not found' });
+            }
         }
 
-        const destHospital = await Hospital.findOne({ hospitalId: destinationHospitalId });
-        if (!destHospital) {
-            return res.status(400).json({ success: false, message: 'Destination hospital not found' });
+        if (destinationHospitalId) {
+            destHospital = await Hospital.findOne({ hospitalId: destinationHospitalId });
+            if (!destHospital) {
+                return res.status(400).json({ success: false, message: 'Destination hospital not found' });
+            }
+        }
+
+        // Option B: Location names provided → geocode
+        let geocodedSource, geocodedDest;
+        if (sourceName && destinationName) {
+            const geocoded = await geocodePair(sourceName, destinationName);
+            geocodedSource = geocoded.source;
+            geocodedDest = geocoded.destination;
+        }
+
+        // Build source/dest objects
+        const srcData = sourceHospital ? {
+            hospitalId: sourceHospital.hospitalId,
+            name: sourceHospital.name,
+            location: sourceHospital.location
+        } : geocodedSource ? {
+            hospitalId: 'GEOCODED',
+            name: sourceName,
+            location: {
+                type: 'Point',
+                coordinates: [geocodedSource.lng, geocodedSource.lat]
+            }
+        } : null;
+
+        const destData = destHospital ? {
+            hospitalId: destHospital.hospitalId,
+            name: destHospital.name,
+            location: destHospital.location
+        } : geocodedDest ? {
+            hospitalId: 'GEOCODED',
+            name: destinationName,
+            location: {
+                type: 'Point',
+                coordinates: [geocodedDest.lng, geocodedDest.lat]
+            }
+        } : null;
+
+        if (!srcData || !destData) {
+            return res.status(400).json({ success: false, message: 'Source and destination required (hospital IDs or location names)' });
         }
 
         // Get ambulance info if provided
@@ -30,37 +81,72 @@ const createCorridor = async (req, res, next) => {
                 ambulanceInfo = {
                     ambulanceId: ambulance._id.toString(),
                     driverId: ambulance.driverId,
-                    vehicleNumber: ambulance.vehicleNumbers[0],
+                    vehicleNumber: ambulance.vehicleNumbers?.[0],
                     driverName: ambulance.driverName,
                     contactNumber: ambulance.contactNumber
                 };
             }
         }
 
+        // Fetch OSRM route & apply emergency cost
+        const srcCoords = {
+            lat: srcData.location.coordinates[1],
+            lng: srcData.location.coordinates[0]
+        };
+        const destCoords = {
+            lat: destData.location.coordinates[1],
+            lng: destData.location.coordinates[0]
+        };
+
+        const osrmRoutes = await fetchRoutes(srcCoords, destCoords);
+        const { bestRoute } = await evaluateRoutes(osrmRoutes, urgencyLevel || 'CRITICAL');
+
+        // Create corridor with route embedded
         const corridor = await GreenCorridor.create({
-            sourceHospital: {
-                hospitalId: sourceHospital.hospitalId,
-                name: sourceHospital.name,
-                location: sourceHospital.location
-            },
-            destinationHospital: {
-                hospitalId: destHospital.hospitalId,
-                name: destHospital.name,
-                location: destHospital.location
-            },
+            sourceHospital: srcData,
+            destinationHospital: destData,
             organType,
             urgencyLevel,
             ambulance: ambulanceInfo,
             doctorInCharge,
             notes,
-            requestedBy: req.user._id
+            requestedBy: req.user._id,
+            selectedRoute: bestRoute ? {
+                waypoints: bestRoute.waypoints,
+                distance: bestRoute.distance,
+                duration: bestRoute.duration,
+                demoMode: bestRoute.demoMode
+            } : undefined,
+            predictedETA: bestRoute?.emergencyCost
         });
+
+        // Save route to Route collection too
+        if (bestRoute) {
+            await Route.create({
+                corridorId: corridor.corridorId,
+                waypoints: bestRoute.waypoints,
+                distance: bestRoute.distance,
+                estimatedDuration: bestRoute.emergencyCost,
+                routeType: 'PRIMARY',
+                isSelected: true,
+                trafficSignalsOnRoute: (bestRoute.signals || []).map(s => ({
+                    signalId: s.id,
+                    name: s.name,
+                    location: { type: 'Point', coordinates: [s.position[1], s.position[0]] }
+                }))
+            });
+        }
 
         await AuditLog.create({
             action: 'CORRIDOR_CREATED',
             userId: req.user._id,
             corridorId: corridor.corridorId,
-            details: { organType, urgencyLevel, source: sourceHospital.name, destination: destHospital.name },
+            details: {
+                organType, urgencyLevel,
+                source: srcData.name, destination: destData.name,
+                demoMode: bestRoute?.demoMode || false,
+                emergencyCost: bestRoute?.emergencyCost
+            },
             ipAddress: req.ip
         });
 
@@ -76,7 +162,15 @@ const createCorridor = async (req, res, next) => {
         res.status(201).json({
             success: true,
             message: 'Green corridor request created',
-            corridor
+            corridor,
+            route: bestRoute ? {
+                waypoints: bestRoute.waypoints,
+                distance: bestRoute.distance,
+                emergencyCost: bestRoute.emergencyCost,
+                breakdown: bestRoute.breakdown,
+                signals: bestRoute.signals,
+                demoMode: bestRoute.demoMode
+            } : null
         });
     } catch (error) {
         next(error);

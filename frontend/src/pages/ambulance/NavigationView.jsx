@@ -41,44 +41,59 @@ const NavigationView = () => {
         return () => { socket.off('signal_cleared'); socket.off('route_updated'); };
     }, [socket]);
 
-    // Start GPS tracking
+    // Continuous GPS tracking - uses both watchPosition AND a periodic interval
+    // watchPosition alone only fires when position actually changes, which means
+    // on desktop or when stationary, the marker appears frozen. The interval
+    // ensures we poll + emit GPS continuously every 2 seconds.
     useEffect(() => {
         if (!corridor) return;
+        if (!('geolocation' in navigator)) return;
 
-        if ('geolocation' in navigator) {
-            watchIdRef.current = navigator.geolocation.watchPosition(
-                (position) => {
-                    const pos = {
-                        lat: position.coords.latitude,
-                        lng: position.coords.longitude,
-                        accuracy: position.coords.accuracy,
-                        speed: position.coords.speed,
-                        heading: position.coords.heading,
-                        timestamp: Date.now()
-                    };
-                    setCurrentPosition(pos);
-                    setSpeed(pos.speed || 0);
-                    setGpsActive(true);
+        const gpsOptions = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
 
-                    // Send GPS to server every update
-                    sendGPS({ corridorId, position: pos });
+        const handlePosition = (position) => {
+            const pos = {
+                lat: position.coords.latitude,
+                lng: position.coords.longitude,
+                accuracy: position.coords.accuracy,
+                speed: position.coords.speed,
+                heading: position.coords.heading,
+                timestamp: Date.now()
+            };
+            setCurrentPosition(pos);
+            setSpeed(pos.speed || 0);
+            setGpsActive(true);
 
-                    // Update marker on map
-                    updateAmbulanceMarker(pos);
-                },
-                (error) => {
-                    console.error('GPS Error:', error);
-                    setGpsActive(false);
-                    toast.error('GPS signal lost');
-                },
-                { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+            // Send GPS to server
+            sendGPS({ corridorId, position: pos });
+
+            // Update marker on map (smooth transition)
+            updateAmbulanceMarker(pos);
+        };
+
+        const handleError = (error) => {
+            console.error('GPS Error:', error);
+            setGpsActive(false);
+        };
+
+        // 1) watchPosition for instant movement detection
+        watchIdRef.current = navigator.geolocation.watchPosition(
+            handlePosition, handleError, gpsOptions
+        );
+
+        // 2) Periodic polling every 2s to ensure continuous GPS emission
+        //    This fixes the "static marker" issue where watchPosition fires once
+        const intervalId = setInterval(() => {
+            navigator.geolocation.getCurrentPosition(
+                handlePosition, handleError, gpsOptions
             );
-        }
+        }, 2000);
 
         return () => {
-            if (watchIdRef.current) navigator.geolocation.clearWatch(watchIdRef.current);
+            if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
+            clearInterval(intervalId);
         };
-    }, [corridor]);
+    }, [corridor, corridorId, sendGPS]);
 
     // Initialize map
     useEffect(() => {
@@ -137,11 +152,11 @@ const NavigationView = () => {
         } else {
             ambulanceMarkerRef.current = L.marker([pos.lat, pos.lng], {
                 icon: L.divIcon({
-                    className: '', html: '<div style="background:#ef4444;color:white;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;border:3px solid white;box-shadow:0 0 15px rgba(239,68,68,0.5)">🚑</div>', iconSize: [40, 40]
+                    className: 'ambulance-live-marker', html: '<div style="background:#ef4444;color:white;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;border:3px solid white;box-shadow:0 0 15px rgba(239,68,68,0.5);transition:all 0.5s ease">🚑</div>', iconSize: [40, 40]
                 })
             }).addTo(mapInstance.current);
         }
-        mapInstance.current.setView([pos.lat, pos.lng], mapInstance.current.getZoom());
+        mapInstance.current.panTo([pos.lat, pos.lng], { animate: true, duration: 0.5 });
     };
 
     const fetchCorridor = async () => {

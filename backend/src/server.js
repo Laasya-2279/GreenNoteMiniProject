@@ -11,7 +11,7 @@ const { initWebSocket } = require('./config/websocket');
 const { morganMiddleware, logger } = require('./middleware/logger.middleware');
 const errorHandler = require('./middleware/errorHandler.middleware');
 const routes = require('./routes');
-const setupWebSocket = require('./websocket/socketHandler');
+const setupCorridorSocket = require('./sockets/corridorSocket');
 
 const app = express();
 const server = http.createServer(app);
@@ -40,7 +40,7 @@ app.get('/', (req, res) => {
     res.json({
         success: true,
         message: '🏥 GreenNote API - Green Corridor Management System',
-        version: '1.0.0',
+        version: '2.0.0',
         endpoints: {
             health: '/api/health',
             auth: '/api/auth',
@@ -50,13 +50,14 @@ app.get('/', (req, res) => {
             ambulance: '/api/ambulance',
             traffic: '/api/traffic',
             public: '/api/public',
-            routes: '/api/routes'
+            routes: '/api/routes',
+            geocode: '/api/routes/geocode'
         }
     });
 });
 
-// Setup WebSocket
-setupWebSocket(io);
+// Setup WebSocket (new corridor-based handler)
+setupCorridorSocket(io);
 
 // Error handling
 app.use(errorHandler);
@@ -70,7 +71,7 @@ const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, () => {
     logger.info(`🚀 GreenNote Server running on port ${PORT}`);
-    logger.info(`📡 WebSocket ready`);
+    logger.info(`📡 WebSocket ready (corridor engine active)`);
     logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
