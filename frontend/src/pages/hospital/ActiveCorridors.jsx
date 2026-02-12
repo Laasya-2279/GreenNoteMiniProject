@@ -66,7 +66,7 @@ const ActiveCorridors = () => {
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginTop: '16px' }}>
                                 <div><p style={{ color: '#64748b', fontSize: '12px' }}>Organ</p><p style={{ color: '#e2e8f0', fontWeight: '600' }}>{c.organType}</p></div>
-                                <div><p style={{ color: '#64748b', fontSize: '12px' }}>ETA</p><p style={{ color: '#e2e8f0', fontWeight: '600' }}>{c.predictedETA ? `${Math.round(c.predictedETA / 60)} min` : 'Calculating...'}</p></div>
+                                <div><p style={{ color: '#64748b', fontSize: '12px' }}>ETA</p><p style={{ color: '#e2e8f0', fontWeight: '600' }}>{c.predictedETA ? `${Math.round(c.predictedETA / 60)} min` : 'Awaiting GPS...'}</p></div>
                                 <div><p style={{ color: '#64748b', fontSize: '12px' }}>Driver</p><p style={{ color: '#e2e8f0', fontWeight: '600' }}>{c.ambulance?.driverName || 'Unassigned'}</p></div>
                                 <div><p style={{ color: '#64748b', fontSize: '12px' }}>Distance</p><p style={{ color: '#e2e8f0', fontWeight: '600' }}>{c.selectedRoute?.distance ? `${(c.selectedRoute.distance / 1000).toFixed(1)} km` : '-'}</p></div>
                             </div>

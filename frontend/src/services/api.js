@@ -62,6 +62,7 @@ export const controlRoomAPI = {
     approve: (id, data) => api.patch(`/controlroom/requests/${id}/approve`, data),
     reject: (id, data) => api.patch(`/controlroom/requests/${id}/reject`, data),
     getActiveCorridors: () => api.get('/controlroom/corridors/active'),
+    cleanupCorridors: () => api.post('/controlroom/corridors/cleanup'),
     getAuditLogs: (params) => api.get('/controlroom/audit-logs', { params })
 };
 
@@ -90,6 +91,7 @@ export const publicAPI = {
 // Route API
 export const routeAPI = {
     calculate: (data) => api.post('/routes/calculate', data),
+    geocode: (query) => api.get('/routes/geocode', { params: { q: query } }),
     getSignalsOnRoute: (waypoints) => api.get('/signals/on-route', { params: { waypoints: JSON.stringify(waypoints) } }),
     getRoutes: (corridorId) => api.get(`/routes/${corridorId}`)
 };

@@ -7,7 +7,7 @@ import { toast } from 'react-toastify';
 const NavigationView = () => {
     const { corridorId } = useParams();
     const navigate = useNavigate();
-    const { sendGPS, socket, joinCorridor } = useWebSocket();
+    const { sendGPS, sendGPSUpdate, socket, joinCorridor } = useWebSocket();
     const [corridor, setCorridor] = useState(null);
     const [loading, setLoading] = useState(true);
     const [gpsActive, setGpsActive] = useState(false);
@@ -25,21 +25,32 @@ const NavigationView = () => {
         joinCorridor(corridorId);
     }, [corridorId]);
 
-    // Listen for signal cleared events
+    // Listen for real-time corridor updates (ETA, signals, rerouting)
     useEffect(() => {
         if (!socket) return;
+
+        // corridor:update — live ETA from backend
+        socket.on('corridor:update', (data) => {
+            if (data.corridorId !== corridorId) return;
+            // Update ETA with backend-computed value (polyline-aware + signals + ML)
+            if (data.eta != null) setEtaCountdown(data.eta);
+        });
+
         socket.on('signal_cleared', (data) => {
             setClearedSignals(prev => [...prev, data.signalId]);
             toast.success(`🚦 Signal ${data.name || data.signalId} cleared!`, { autoClose: 5000 });
-            // Play audio alert
             try { new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgA').play(); } catch { }
         });
-        socket.on('route_updated', () => {
-            toast.info('🛤️ Route updated!');
-            fetchCorridor();
+        socket.on('route_updated', (data) => {
+            toast.info('🛤️ Route recalculated — deviation detected');
+            fetchCorridor(); // Reload to get new waypoints on the map
         });
-        return () => { socket.off('signal_cleared'); socket.off('route_updated'); };
-    }, [socket]);
+        return () => {
+            socket.off('corridor:update');
+            socket.off('signal_cleared');
+            socket.off('route_updated');
+        };
+    }, [socket, corridorId]);
 
     // Continuous GPS tracking - uses both watchPosition AND a periodic interval
     // watchPosition alone only fires when position actually changes, which means
@@ -64,8 +75,8 @@ const NavigationView = () => {
             setSpeed(pos.speed || 0);
             setGpsActive(true);
 
-            // Send GPS to server
-            sendGPS({ corridorId, position: pos });
+            // Send GPS to server via new event (ambulance:gpsUpdate)
+            sendGPSUpdate({ corridorId, lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy, speed: pos.speed, heading: pos.heading });
 
             // Update marker on map (smooth transition)
             updateAmbulanceMarker(pos);

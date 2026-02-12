@@ -6,6 +6,7 @@ import { toast } from 'react-toastify';
 const LiveMonitoring = () => {
     const [corridors, setCorridors] = useState([]);
     const [gpsPositions, setGpsPositions] = useState({});
+    const [liveETAs, setLiveETAs] = useState({});
     const [loading, setLoading] = useState(true);
     const { socket } = useWebSocket();
     const mapRef = useRef(null);
@@ -17,12 +18,25 @@ const LiveMonitoring = () => {
     useEffect(() => {
         if (!socket) return;
 
-        socket.on('gps_update', (data) => {
-            setGpsPositions(prev => ({
+        // corridor:update — full state from backend (position, ETA, signals, route)
+        socket.on('corridor:update', (data) => {
+            setGpsPositions(prev => ({ ...prev, [data.corridorId]: data.position }));
+            setLiveETAs(prev => ({
                 ...prev,
-                [data.corridorId]: data.position
+                [data.corridorId]: {
+                    eta: data.eta,
+                    etaFormatted: data.etaFormatted,
+                    remainingDistance: data.remainingDistance,
+                    rerouted: data.rerouted
+                }
             }));
-            // Update marker on map
+            updateMarker(data.corridorId, data.position);
+        });
+
+        // Legacy — still process gps_update for backward compat
+        socket.on('gps_update', (data) => {
+            setGpsPositions(prev => ({ ...prev, [data.corridorId]: data.position }));
+            if (data.eta) setLiveETAs(prev => ({ ...prev, [data.corridorId]: { eta: data.eta, etaFormatted: data.etaFormatted } }));
             updateMarker(data.corridorId, data.position);
         });
 
@@ -32,6 +46,7 @@ const LiveMonitoring = () => {
         });
 
         return () => {
+            socket.off('corridor:update');
             socket.off('gps_update');
             socket.off('corridor_status');
             socket.off('signal_cleared');
@@ -132,16 +147,19 @@ const LiveMonitoring = () => {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '16px' }}>
                 {corridors.map(c => {
                     const gps = gpsPositions[c.corridorId];
+                    const liveETA = liveETAs[c.corridorId];
+                    const etaDisplay = liveETA?.etaFormatted || (c.predictedETA ? `${Math.round(c.predictedETA / 60)} min` : '-');
                     return (
-                        <div key={c.corridorId} className="glass-card" style={{ borderLeft: '4px solid #3b82f6' }}>
+                        <div key={c.corridorId} className="glass-card" style={{ borderLeft: `4px solid ${c.urgencyLevel === 'VERY_CRITICAL' ? '#ef4444' : c.urgencyLevel === 'CRITICAL' ? '#f97316' : '#3b82f6'}` }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                                 <h4 style={{ fontWeight: '700', color: '#e2e8f0' }}>{c.corridorId}</h4>
                                 <span className={`badge badge-${c.status?.toLowerCase()?.replace('_', '-')}`}>{c.status?.replace('_', ' ')}</span>
                             </div>
                             <p style={{ fontSize: '13px', color: '#94a3b8' }}>{c.sourceHospital?.name} → {c.destinationHospital?.name}</p>
+                            {liveETA?.rerouted && <p style={{ fontSize: '11px', color: '#f97316', marginTop: '4px' }}>⚡ Route recalculated</p>}
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '12px' }}>
                                 <div><span style={{ fontSize: '11px', color: '#64748b' }}>Organ</span><br /><span style={{ fontWeight: '600' }}>{c.organType}</span></div>
-                                <div><span style={{ fontSize: '11px', color: '#64748b' }}>ETA</span><br /><span style={{ fontWeight: '600', color: '#10b981' }}>{c.predictedETA ? `${Math.round(c.predictedETA / 60)} min` : '-'}</span></div>
+                                <div><span style={{ fontSize: '11px', color: '#64748b' }}>ETA (Live)</span><br /><span style={{ fontWeight: '700', color: '#10b981', fontSize: '14px' }}>{etaDisplay}</span></div>
                                 <div><span style={{ fontSize: '11px', color: '#64748b' }}>Speed</span><br /><span style={{ fontWeight: '600' }}>{gps?.speed ? `${(gps.speed * 3.6).toFixed(0)} km/h` : '-'}</span></div>
                                 <div><span style={{ fontSize: '11px', color: '#64748b' }}>Accuracy</span><br /><span style={{ fontWeight: '600' }}>{gps?.accuracy ? `${gps.accuracy.toFixed(0)}m` : '-'}</span></div>
                             </div>

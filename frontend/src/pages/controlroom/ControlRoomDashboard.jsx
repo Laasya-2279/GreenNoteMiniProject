@@ -10,14 +10,36 @@ const ControlRoomDashboard = () => {
     const { socket, connected } = useWebSocket();
     const [pending, setPending] = useState([]);
     const [active, setActive] = useState([]);
+    const [liveETAs, setLiveETAs] = useState({});
     const [loading, setLoading] = useState(true);
 
     useEffect(() => { fetchAll(); }, []);
 
     useEffect(() => {
         if (!socket) return;
+
+        // Listen for corridor lifecycle events
         socket.on('corridor_status', () => fetchAll());
-        return () => socket.off('corridor_status');
+
+        // Listen for LIVE corridor updates from backend
+        // This provides real-time ETA, not stale DB value
+        socket.on('corridor:update', (data) => {
+            if (data.eta != null) {
+                setLiveETAs(prev => ({
+                    ...prev,
+                    [data.corridorId]: {
+                        eta: data.eta,
+                        etaFormatted: data.etaFormatted,
+                        rerouted: data.rerouted
+                    }
+                }));
+            }
+        });
+
+        return () => {
+            socket.off('corridor_status');
+            socket.off('corridor:update');
+        };
     }, [socket]);
 
     const fetchAll = async () => {
@@ -32,6 +54,31 @@ const ControlRoomDashboard = () => {
         finally { setLoading(false); }
     };
 
+    // Cleanup stale corridors (mark old ones as COMPLETED)
+    const handleCleanup = async () => {
+        try {
+            const res = await controlRoomAPI.cleanupCorridors();
+            const count = res.data?.cleaned || 0;
+            if (count > 0) {
+                toast.success(`🧹 Cleaned ${count} stale corridor(s)`);
+                fetchAll();
+            } else {
+                toast.info('No stale corridors to clean');
+            }
+        } catch {
+            toast.error('Cleanup failed');
+        }
+    };
+
+    // Get display ETA — prefer live socket value, fallback to DB value
+    const getETADisplay = (corridor) => {
+        const live = liveETAs[corridor.corridorId];
+        if (live?.etaFormatted) return live.etaFormatted;
+        if (live?.eta) return `${Math.round(live.eta / 60)} min`;
+        if (corridor.predictedETA) return `ETA: ${Math.round(corridor.predictedETA / 60)} min`;
+        return 'Awaiting GPS...';
+    };
+
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '60px' }}><div className="spinner"></div></div>;
 
     return (
@@ -41,11 +88,17 @@ const ControlRoomDashboard = () => {
                     <h1 style={{ fontSize: '26px', fontWeight: '800', color: '#e2e8f0' }}>Control Room</h1>
                     <p style={{ color: '#94a3b8', fontSize: '14px', marginTop: '4px' }}>Welcome, {user?.name}</p>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: connected ? '#10b981' : '#ef4444' }}></div>
-                    <span style={{ fontSize: '13px', color: connected ? '#10b981' : '#ef4444', fontWeight: '600' }}>
-                        {connected ? 'Live' : 'Offline'}
-                    </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <div style={{
+                            width: '10px', height: '10px', borderRadius: '50%',
+                            background: connected ? '#10b981' : '#ef4444',
+                            boxShadow: connected ? '0 0 8px #10b981' : '0 0 8px #ef4444'
+                        }}></div>
+                        <span style={{ fontSize: '13px', color: connected ? '#10b981' : '#ef4444', fontWeight: '600' }}>
+                            {connected ? 'Live' : 'Reconnecting...'}
+                        </span>
+                    </div>
                 </div>
             </div>
 
@@ -54,7 +107,7 @@ const ControlRoomDashboard = () => {
                 {[
                     { label: 'Pending', value: pending.length, icon: '📥', color: '#f59e0b' },
                     { label: 'Active', value: active.length, icon: '🚨', color: '#3b82f6' },
-                    { label: 'WS Status', value: connected ? 'Live' : 'Off', icon: '📡', color: connected ? '#10b981' : '#ef4444' }
+                    { label: 'WS Status', value: connected ? 'Live' : 'Off', icon: connected ? '📡' : '🔌', color: connected ? '#10b981' : '#ef4444' }
                 ].map(s => (
                     <div key={s.label} className="stat-card">
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -91,26 +144,51 @@ const ControlRoomDashboard = () => {
 
             {/* Active Corridors */}
             <div className="glass-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
                     <h3 style={{ fontSize: '16px', fontWeight: '700', color: '#e2e8f0' }}>🗺️ Active Corridors ({active.length})</h3>
-                    <Link to="/controlroom/monitoring" style={{ color: '#059669', fontSize: '13px', textDecoration: 'none', fontWeight: '600' }}>Live Map →</Link>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        {active.length > 3 && (
+                            <button onClick={handleCleanup} style={{
+                                padding: '4px 10px', background: 'rgba(239, 68, 68, 0.15)',
+                                color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.3)',
+                                borderRadius: '6px', cursor: 'pointer', fontSize: '11px', fontWeight: '600'
+                            }}>
+                                🧹 Cleanup stale
+                            </button>
+                        )}
+                        <Link to="/controlroom/monitoring" style={{ color: '#059669', fontSize: '13px', textDecoration: 'none', fontWeight: '600' }}>Live Map →</Link>
+                    </div>
                 </div>
                 {active.length === 0 ? (
                     <p style={{ color: '#64748b', textAlign: 'center', padding: '16px' }}>No active corridors</p>
                 ) : (
-                    active.map(c => (
-                        <div key={c.corridorId} style={{ padding: '12px', background: 'rgba(15, 23, 42, 0.5)', borderRadius: '10px', marginBottom: '8px', borderLeft: '3px solid #3b82f6' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <div>
-                                    <span style={{ fontWeight: '600', color: '#e2e8f0' }}>{c.corridorId}</span>
-                                    <span style={{ color: '#94a3b8', marginLeft: '8px', fontSize: '13px' }}>{c.organType}</span>
+                    active.map(c => {
+                        const etaDisplay = getETADisplay(c);
+                        const borderColor = c.urgencyLevel === 'VERY_CRITICAL' ? '#ef4444' : c.urgencyLevel === 'CRITICAL' ? '#f97316' : '#3b82f6';
+                        return (
+                            <div key={c.corridorId} style={{
+                                padding: '12px', background: 'rgba(15, 23, 42, 0.5)',
+                                borderRadius: '10px', marginBottom: '8px',
+                                borderLeft: `3px solid ${borderColor}`
+                            }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <div>
+                                        <span style={{ fontWeight: '600', color: '#e2e8f0' }}>{c.corridorId}</span>
+                                        <span style={{ color: '#94a3b8', marginLeft: '8px', fontSize: '13px' }}>{c.organType}</span>
+                                    </div>
+                                    <span style={{
+                                        color: liveETAs[c.corridorId] ? '#10b981' : '#93c5fd',
+                                        fontWeight: '700', fontSize: '14px'
+                                    }}>
+                                        {etaDisplay}
+                                    </span>
                                 </div>
-                                <span style={{ color: '#93c5fd', fontWeight: '600', fontSize: '14px' }}>
-                                    {c.predictedETA ? `ETA: ${Math.round(c.predictedETA / 60)} min` : 'Calculating...'}
-                                </span>
+                                {liveETAs[c.corridorId]?.rerouted && (
+                                    <span style={{ fontSize: '10px', color: '#f97316', marginTop: '2px', display: 'block' }}>⚡ Rerouted</span>
+                                )}
                             </div>
-                        </div>
-                    ))
+                        );
+                    })
                 )}
             </div>
         </div>

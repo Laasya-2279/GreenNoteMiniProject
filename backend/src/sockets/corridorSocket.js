@@ -1,13 +1,85 @@
 // Corridor Socket — Socket.IO handler for live green corridor operations
-// Replaces old websocket/socketHandler.js with new event structure:
-//   ambulance:gpsUpdate → backend processes → corridor:update broadcast
+// Event flow: ambulance:gpsUpdate → backend processes → corridor:update broadcast
 const jwt = require('jsonwebtoken');
 const { jwtSecret } = require('../config/auth');
 const User = require('../models/User');
 const { processGPSUpdate } = require('../algorithms/movementEngine');
 
+/**
+ * Core GPS processing function — shared between ambulance:gpsUpdate and legacy send_gps
+ */
+async function handleGPSEvent(io, socket, { corridorId, lat, lng, accuracy, speed, heading }) {
+    if (!corridorId || lat == null || lng == null) return;
+
+    const position = { lat, lng, accuracy, speed, heading };
+
+    // Process through movement engine (save, detect deviation, reroute, signals, ETA)
+    const result = await processGPSUpdate({
+        corridorId,
+        position,
+        userId: socket.user?._id?.toString(),
+        io
+    });
+
+    // Build broadcast payload with full corridor state
+    const updatePayload = {
+        corridorId,
+        position: result.position,
+        route: result.route,
+        signals: result.signals,
+        eta: result.eta,                          // seconds
+        etaFormatted: result.etaFormatted,        // "3m 42s"
+        remainingDistance: result.remainingDistance,// meters
+        etaBreakdown: result.etaBreakdown,        // debug info
+        criticality: result.criticality,
+        rerouted: result.rerouted,
+        demoMode: result.demoMode,
+        timestamp: Date.now()
+    };
+
+    // Broadcast corridor:update to ALL role rooms + corridor-specific room
+    io.to(`corridor_${corridorId}`).emit('corridor:update', updatePayload);
+    io.to('control_room').emit('corridor:update', updatePayload);
+    io.to('traffic').emit('corridor:update', updatePayload);
+    io.to('hospital').emit('corridor:update', updatePayload);
+    io.to('public').emit('corridor:update', updatePayload);
+
+    // Also emit legacy gps_update for backward compatibility with old frontend views
+    const legacyPayload = {
+        corridorId,
+        position: result.position,
+        eta: result.eta,
+        etaFormatted: result.etaFormatted,
+        timestamp: Date.now()
+    };
+    io.to(`corridor_${corridorId}`).emit('gps_update', legacyPayload);
+    io.to('control_room').emit('gps_update', legacyPayload);
+
+    // Notify about cleared signals
+    if (result.clearedSignals?.length > 0) {
+        for (const sig of result.clearedSignals) {
+            io.to(`corridor_${corridorId}`).emit('signal_cleared', {
+                signalId: sig.id,
+                name: sig.name,
+                state: 'GREEN',
+                location: sig.position
+            });
+        }
+    }
+
+    // Notify if rerouted
+    if (result.rerouted) {
+        io.to(`corridor_${corridorId}`).emit('route_updated', {
+            corridorId,
+            reason: 'DEVIATION_DETECTED',
+            newETA: result.eta,
+            newETAFormatted: result.etaFormatted
+        });
+    }
+}
+
 const setupCorridorSocket = (io) => {
-    // JWT Auth middleware
+    // JWT Auth middleware — allows unauthenticated connections as PUBLIC
     io.use(async (socket, next) => {
         try {
             const token = socket.handshake.auth.token || socket.handshake.query.token;
@@ -21,17 +93,20 @@ const setupCorridorSocket = (io) => {
             socket.user = user;
             next();
         } catch (err) {
+            // Allow connection but as PUBLIC
             socket.user = { role: 'PUBLIC' };
             next();
         }
     });
 
     io.on('connection', (socket) => {
-        console.log(`[Socket] Connected: ${socket.id} (${socket.user?.role || 'PUBLIC'})`);
+        console.log(`[Socket] Connected: ${socket.id} | role: ${socket.user?.role || 'PUBLIC'}`);
 
-        // Auto-join role room
+        // Auto-join role-based room
         if (socket.user?.role) {
-            socket.join(socket.user.role.toLowerCase());
+            const roleRoom = socket.user.role.toLowerCase();
+            socket.join(roleRoom);
+            console.log(`[Socket] ${socket.id} joined room: ${roleRoom}`);
         }
 
         // ─── Room Management ───
@@ -48,93 +123,35 @@ const setupCorridorSocket = (io) => {
 
         socket.on('join_public', () => socket.join('public'));
 
-        // ─── AMBULANCE GPS UPDATE (core event) ───
-        // From Ambulance: ambulance:gpsUpdate → Backend processes → corridor:update broadcast
-        socket.on('ambulance:gpsUpdate', async ({ corridorId, lat, lng, accuracy, speed, heading }) => {
+        // ─── AMBULANCE GPS UPDATE (primary event) ───
+        socket.on('ambulance:gpsUpdate', async (data) => {
             try {
-                if (!corridorId || lat == null || lng == null) return;
-
-                const position = { lat, lng, accuracy, speed, heading };
-
-                // Process through movement engine (save, detect deviation, reroute, signals)
-                const result = await processGPSUpdate({
-                    corridorId,
-                    position,
-                    userId: socket.user?._id?.toString(),
-                    io
-                });
-
-                // Broadcast corridor:update to all watchers
-                const updatePayload = {
-                    corridorId,
-                    position: result.position,
-                    route: result.route,
-                    signals: result.signals,
-                    eta: result.eta,
-                    criticality: result.criticality,
-                    rerouted: result.rerouted,
-                    demoMode: result.demoMode,
-                    timestamp: Date.now()
-                };
-
-                // Broadcast to: corridor room, control room, traffic, hospital, public
-                io.to(`corridor_${corridorId}`).emit('corridor:update', updatePayload);
-                io.to('control_room').emit('corridor:update', updatePayload);
-                io.to('traffic').emit('corridor:update', updatePayload);
-                io.to('hospital').emit('corridor:update', updatePayload);
-                io.to('public').emit('corridor:update', updatePayload);
-
-                // Also emit legacy gps_update for backward compatibility
-                io.to(`corridor_${corridorId}`).emit('gps_update', {
-                    corridorId,
-                    position: result.position,
-                    timestamp: Date.now()
-                });
-                io.to('control_room').emit('gps_update', {
-                    corridorId,
-                    position: result.position,
-                    timestamp: Date.now()
-                });
-
-                // Notify about cleared signals
-                if (result.clearedSignals?.length > 0) {
-                    for (const sig of result.clearedSignals) {
-                        io.to(`corridor_${corridorId}`).emit('signal_cleared', {
-                            signalId: sig.id,
-                            name: sig.name,
-                            state: 'GREEN',
-                            location: sig.position
-                        });
-                    }
-                }
-
-                // Notify if rerouted
-                if (result.rerouted) {
-                    io.to(`corridor_${corridorId}`).emit('route_updated', {
-                        corridorId,
-                        reason: 'DEVIATION_DETECTED',
-                        newETA: result.eta
-                    });
-                }
+                await handleGPSEvent(io, socket, data);
             } catch (error) {
-                console.error('[Socket] GPS processing error:', error.message);
+                console.error('[Socket] ambulance:gpsUpdate error:', error.message);
             }
         });
 
-        // ─── LEGACY: send_gps (backward compat for existing ambulance frontend) ───
+        // ─── LEGACY: send_gps (backward compat for old ambulance views) ───
+        // FIX: Previously this did socket.emit() which sent event back to client.
+        // Now it directly calls the same handler function.
         socket.on('send_gps', async (data) => {
-            const { corridorId, position } = data || {};
-            if (!corridorId || !position) return;
+            try {
+                const { corridorId, position } = data || {};
+                if (!corridorId || !position) return;
 
-            // Delegate to the new handler
-            socket.emit('ambulance:gpsUpdate', {
-                corridorId,
-                lat: position.lat,
-                lng: position.lng,
-                accuracy: position.accuracy,
-                speed: position.speed,
-                heading: position.heading
-            });
+                // Call the same core handler — no recursive emit
+                await handleGPSEvent(io, socket, {
+                    corridorId,
+                    lat: position.lat,
+                    lng: position.lng,
+                    accuracy: position.accuracy,
+                    speed: position.speed,
+                    heading: position.heading
+                });
+            } catch (error) {
+                console.error('[Socket] send_gps error:', error.message);
+            }
         });
 
         // ─── Signal Override (Traffic Department) ───

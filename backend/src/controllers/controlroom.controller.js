@@ -171,4 +171,47 @@ const getAuditLogs = async (req, res, next) => {
     }
 };
 
-module.exports = { getPendingRequests, approveRequest, rejectRequest, getActiveCorridors, getAuditLogs };
+// POST /api/controlroom/corridors/cleanup - batch complete stale corridors
+const cleanupCorridors = async (req, res, next) => {
+    try {
+        // Mark corridors older than 24 hours as COMPLETED
+        const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+        const staleCorridors = await GreenCorridor.find({
+            status: { $in: ['APPROVED', 'IN_PROGRESS'] },
+            createdAt: { $lt: cutoff }
+        });
+
+        let cleaned = 0;
+        for (const corridor of staleCorridors) {
+            corridor.status = 'COMPLETED';
+            corridor.completedAt = new Date();
+            corridor.completionReason = 'AUTO_CLEANUP';
+            if (corridor.startedAt) {
+                corridor.actualDuration = Math.round((corridor.completedAt - corridor.startedAt) / 1000);
+            }
+            await corridor.save();
+            cleaned++;
+        }
+
+        // Notify all dashboards
+        const io = req.app.get('io');
+        if (io && cleaned > 0) {
+            io.to('control_room').emit('corridor_status', { type: 'CLEANUP', cleaned });
+            io.to('traffic').emit('corridor_status', { type: 'CLEANUP', cleaned });
+        }
+
+        await AuditLog.create({
+            action: 'CORRIDORS_CLEANUP',
+            userId: req.user._id,
+            details: { cleaned, cutoffDate: cutoff },
+            ipAddress: req.ip
+        });
+
+        res.json({ success: true, message: `Cleaned ${cleaned} stale corridor(s)`, cleaned });
+    } catch (error) {
+        next(error);
+    }
+};
+
+module.exports = { getPendingRequests, approveRequest, rejectRequest, getActiveCorridors, getAuditLogs, cleanupCorridors };
